@@ -1,33 +1,38 @@
 import os
+import streamlit as st
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# --- 1. LOAD ENVIRONMENT ---
+# Load .env locally (Ignored on Streamlit Cloud automatically)
 load_dotenv()
 
-# --- 1. CORE SYSTEM SETTINGS ---
-# Fixes the 'ImportError: cannot import name DB_NAME'
+def get_secret(key, default=None):
+    """Hybrid secret loader: Checks Streamlit Cloud Secrets, then Local .env"""
+    try:
+        # Try Streamlit Secrets first (Cloud)
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError, AttributeError):
+        # Fallback to local .env or System Environment Variables
+        return os.getenv(key, default)
+
+# --- 2. API KEYS (Hybrid Loading) ---
+GROQ_API_KEY = get_secret("GROQ_API_KEY")
+BINANCE_API_KEY = get_secret("BINANCE_API_KEY")
+BINANCE_SECRET = get_secret("BINANCE_SECRET")
+
+# --- 3. CORE SYSTEM SETTINGS ---
 DB_NAME = "market_data.db"
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 TIMEZONE_OFFSET = "+5 hours"
 
-# --- 2. API KEYS (Pulled from .env) ---
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
-BINANCE_SECRET = os.getenv("BINANCE_SECRET")
-
-# --- 3. TRADING & AI LOGIC ---
-# Increased to 50 to ensure Bollinger Bands and Fibonacci have enough history
+# --- 4. TRADING & AI LOGIC ---
+# Warm-up period for Technical Indicators
 MIN_CANDLES_REQUIRED = 50
 
-# Only trade if AI confidence is high (0.0 to 1.0)
+# Logic thresholds
 CONFIDENCE_THRESHOLD = 0.85
-
-# Amount to spend per paper trade (USDT)
 TRADE_SIZE_USD = 100.0
 
-# --- 4. RISK MANAGEMENT (EXIT RULES) ---
-# Sell if profit hits +4%
+# --- 5. RISK MANAGEMENT (EXIT RULES) ---
 TAKE_PROFIT_PCT = 0.04
-
-# Sell if loss hits -2%
 STOP_LOSS_PCT = 0.02

@@ -3,14 +3,44 @@ import pandas as pd
 import sqlite3
 import plotly.graph_objects as go 
 import time
-from agent.config import SYMBOLS, TIMEZONE_OFFSET
+import asyncio
+import os
 
-# --- 1. PROFESSIONAL CONFIG ---
+# --- 1. ALL-IN-ONE ENGINE (Cloud & Loop Fix) ---
+from agent.database import init_db
+from agent.config import SYMBOLS, TIMEZONE_OFFSET, MIN_CANDLES_REQUIRED
+from agent.tasks import start_stream
+from agent.main import _ws_message_handler
+
+# Initialize Database immediately
+init_db()
+
+# Safe Loop Handler: This ensures the background worker starts without crashing
+if "worker_started" not in st.session_state:
+    try:
+        # Get or create the event loop
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        for symbol in SYMBOLS:
+            # We schedule the task directly on the loop to avoid "No Running Loop" error
+            loop.create_task(start_stream(symbol, "1m", _ws_message_handler))
+        
+        st.session_state.worker_started = True
+        # Using st.toast or print for non-blocking notification
+        print("🚀 AlphaPro Engine Started Successfully")
+    except Exception as e:
+        st.error(f"Engine Startup Error: {e}")
+
+# --- 2. PROFESSIONAL CONFIG ---
 st.set_page_config(page_title="AlphaPro Terminal", page_icon="📟", layout="wide")
 
-# --- 2. DATA FETCHING FUNCTIONS ---
-def get_wallet():
-    """Ultra-Stable Wallet Fetcher: Always returns 4 values to prevent Unpack Error."""
+# --- 3. DATA FETCHING FUNCTIONS ---
+def get_wallet(selected_coin):
+    """Ultra-Stable Wallet Fetcher with Error Handling."""
     try:
         conn = sqlite3.connect("market_data.db", timeout=10)
         # Fetch USDT
@@ -27,13 +57,12 @@ def get_wallet():
         total_pnl = pnl_res[0] if pnl_res and pnl_res[0] is not None else 0.0
         
         conn.close()
-        # Always return exactly 4 things: Balance, Amount, PnL, Total Equity
+        # Estimating equity at $70k BTC for visual reference
         return balance, amount, total_pnl, (balance + (amount * 70000))
     except Exception:
-        # Emergency Fallback: If DB is locked, return 10k so UI doesn't break
         return 10000.0, 0.0, 0.0, 10000.0
 
-# --- 3. SIDEBAR (The Control Center) ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Configuration")
     selected_coin = st.selectbox("🎯 Select Asset", SYMBOLS, index=0)
@@ -41,7 +70,7 @@ with st.sidebar:
     st.info(f"Viewing: {selected_coin}")
     st.caption("AlphaPro Engine v2.0")
 
-# --- 4. HEADER & TABS ---
+# --- 5. HEADER & TABS ---
 st.title(f"📟 AlphaPro AI Terminal: {selected_coin}")
 tab_investor, tab_scientist, tab_quant = st.tabs([
     "🏦 Portfolio Executive", 
@@ -49,9 +78,9 @@ tab_investor, tab_scientist, tab_quant = st.tabs([
     "🧠 AI Reasoning"
 ])
 
-# --- 5. TAB 1: PORTFOLIO EXECUTIVE ---
+# --- 6. TAB 1: PORTFOLIO EXECUTIVE ---
 with tab_investor:
-    balance, amount, total_pnl, total_equity = get_wallet() 
+    balance, amount, total_pnl, total_equity = get_wallet(selected_coin) 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Balance", f"${balance:,.2f}")
     m2.metric(f"{selected_coin.replace('USDT','')} Held", f"{amount:.6f}")
@@ -60,88 +89,81 @@ with tab_investor:
     
     st.divider()
     st.subheader("📜 Recent Trade History")
-    conn = sqlite3.connect("market_data.db")
-    trades_df = pd.read_sql_query(f"SELECT datetime(timestamp, '+5 hours') as time, type, entry_price, exit_price, pnl_amount, status FROM paper_trades WHERE symbol='{selected_coin}' ORDER BY id DESC LIMIT 10", conn)
-    conn.close()
-    if not trades_df.empty:
-        st.dataframe(trades_df, width=1200) # width='stretch' for newer versions
-    else:
-        st.info("No trades recorded for this asset.")
-
-# --- 6. TAB 2: TECHNICAL LAB ---
-# --- TAB 2: THE SCIENTIST VIEW (TOTAL FIX) ---
-with tab_scientist:
-    # 1. THE BRAIN (Fetch Data First)
-    conn = sqlite3.connect("market_data.db")
-    
-    # --- SURGICAL PATCH: NEEDLE & STATUS SYNC ---
-    sig_row = conn.execute(f"SELECT confidence, reason FROM ai_signals WHERE symbol='{selected_coin}' ORDER BY id DESC LIMIT 1").fetchone()
-    df_candles = pd.read_sql_query(f"SELECT datetime(timestamp/1000, 'unixepoch', '+5 hours') as time, open, high, low, close FROM klines WHERE symbol='{selected_coin}' ORDER BY id DESC LIMIT 60", conn)
-    conn.close()
-
-    # Define the values for the needle and the status lights
-    current_score = (sig_row[0] * 100.0) if sig_row else 0.0
-    reason_text = str(sig_row[1]).upper() if sig_row else ""
-    
-    # These flags light up the 🟢/🔴 status dots below the needle
-    is_bullish = "BULLISH" in reason_text
-    is_squeezing = "SQUEEZE" in reason_text
-    # --- END OF PATCH ---
-
-    # 3. THE TOP ROW: Radar & Gauge
-    col_chart, col_gauge = st.columns([3, 1])
-
-    with col_chart:
-        st.subheader("🕯️ Candlestick Radar")
-        if not df_candles.empty:
-            fig_candles = go.Figure(data=[go.Candlestick(
-                x=df_candles['time'], open=df_candles['open'], high=df_candles['high'], 
-                low=df_candles['low'], close=df_candles['close'],
-                increasing_line_color='#00CC96', decreasing_line_color='#FF4B4B'
-            )])
-            fig_candles.update_layout(xaxis_rangeslider_visible=False, height=500, margin=dict(t=0,b=0,l=0,r=0), template="plotly_dark")
-            st.plotly_chart(fig_candles, width="stretch")
+    try:
+        conn = sqlite3.connect("market_data.db")
+        trades_df = pd.read_sql_query(f"SELECT datetime(timestamp, 'unixepoch', '+5 hours') as time, type, entry_price, exit_price, pnl_amount, status FROM paper_trades WHERE symbol='{selected_coin}' ORDER BY id DESC LIMIT 10", conn)
+        conn.close()
+        if not trades_df.empty:
+            st.dataframe(trades_df, use_container_width=True)
         else:
-            st.info("📡 Gathering market data...")
+            st.info("No trades recorded for this asset yet.")
+    except Exception:
+        st.warning("Connecting to trade records...")
 
-    with col_gauge:
-        st.subheader("🌡️ Strategy")
-        fig_gauge = go.Figure(go.Indicator(
-            mode = "gauge+number", value = current_score,
-            gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "white"},
-                    'steps': [{'range': [0, 30], 'color': "#FF4B4B"},
-                            {'range': [30, 70], 'color': "#FFAA00"},
-                            {'range': [70, 100], 'color': "#00CC96"}]}))
-        fig_gauge.update_layout(height=300, margin=dict(t=30,b=0,l=10,r=10), paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig_gauge, width="stretch")
-        
-        # --- SCORECARD (Right below Gauge) ---
+# --- 7. TAB 2: TECHNICAL LAB ---
+with tab_scientist:
+    try:
+        conn = sqlite3.connect("market_data.db")
+        sig_row = conn.execute(f"SELECT confidence, reason FROM ai_signals WHERE symbol='{selected_coin}' ORDER BY id DESC LIMIT 1").fetchone()
+        df_candles = pd.read_sql_query(f"SELECT datetime(timestamp/1000, 'unixepoch', '+5 hours') as time, open, high, low, close FROM klines WHERE symbol='{selected_coin}' ORDER BY id DESC LIMIT 60", conn)
+        conn.close()
+
+        current_score = (sig_row[0] * 100.0) if sig_row else 0.0
+        reason_text = str(sig_row[1]).upper() if sig_row else ""
+        is_bullish = "BULLISH" in reason_text
+        is_squeezing = "SQUEEZE" in reason_text
+
+        col_chart, col_gauge = st.columns([3, 1])
+
+        with col_chart:
+            st.subheader("🕯️ Candlestick Radar")
+            if not df_candles.empty:
+                fig_candles = go.Figure(data=[go.Candlestick(
+                    x=df_candles['time'], open=df_candles['open'], high=df_candles['high'], 
+                    low=df_candles['low'], close=df_candles['close'],
+                    increasing_line_color='#00CC96', decreasing_line_color='#FF4B4B'
+                )])
+                fig_candles.update_layout(xaxis_rangeslider_visible=False, height=500, margin=dict(t=0,b=0,l=0,r=0), template="plotly_dark")
+                st.plotly_chart(fig_candles, use_container_width=True)
+            else:
+                st.info(f"📡 Gathering market data...")
+
+        with col_gauge:
+            st.subheader("🌡️ Strategy")
+            fig_gauge = go.Figure(go.Indicator(
+                mode = "gauge+number", value = current_score,
+                gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "white"},
+                        'steps': [{'range': [0, 30], 'color': "#FF4B4B"},
+                                {'range': [30, 70], 'color': "#FFAA00"},
+                                {'range': [70, 100], 'color': "#00CC96"}]}))
+            fig_gauge.update_layout(height=300, margin=dict(t=30,b=0,l=10,r=10), paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig_gauge, use_container_width=True)
+            st.divider()
+            st.caption("🔬 Status")
+            st.write(f"Trend: {'Bull 🟢' if is_bullish else 'Bear 🔴'}")
+            st.write(f"Vol: {'Squeeze 🟡' if is_squeezing else 'Normal ⚪'}")
+
         st.divider()
-        st.caption("🔬 Status")
-        st.write(f"Trend: {'Bull 🟢' if is_bullish else 'Bear 🔴'}")
-        st.write(f"Vol: {'Squeeze 🟡' if is_squeezing else 'Normal ⚪'}")
+        st.subheader("📊 Live Market Statistics (OHLC)")
+        if not df_candles.empty:
+            st.table(df_candles[['time', 'open', 'high', 'low', 'close']].head(5))
+    except Exception as e:
+        st.error(f"Waiting for database... {e}")
 
-    # 4. THE BOTTOM ROW: Statistics Table (Outside the columns to be WIDE)
-    st.divider()
-    st.subheader("📊 Live Market Statistics (OHLC)")
-    if not df_candles.empty:
-        # Show the last 5 minutes of data in a wide, clear table
-        st.table(df_candles[['time', 'open', 'high', 'low', 'close']].head(5))
-
-
-
-# --- 7. TAB 3: AI REASONING ---
+# --- 8. TAB 3: AI REASONING ---
 with tab_quant:
     st.subheader("🧠 Live Decision Logic")
-    conn = sqlite3.connect("market_data.db")
-    signals_df = pd.read_sql_query(f"SELECT datetime(timestamp, '+5 hours') as local_time, signal, confidence, reason FROM ai_signals WHERE symbol='{selected_coin}' ORDER BY id DESC LIMIT 5", conn)
-    conn.close()
-    
-    for _, row in signals_df.iterrows():
-        color = "green" if row['signal'] == "BUY" else "red" if row['signal'] == "SELL" else "gray"
-        with st.expander(f"{row['local_time']} - {row['signal']} ({row['confidence']*100:.0f}%)", expanded=True):
-            st.write(row['reason'])
+    try:
+        conn = sqlite3.connect("market_data.db")
+        signals_df = pd.read_sql_query(f"SELECT datetime(timestamp, 'unixepoch', '+5 hours') as local_time, signal, confidence, reason FROM ai_signals WHERE symbol='{selected_coin}' ORDER BY id DESC LIMIT 5", conn)
+        conn.close()
+        
+        for _, row in signals_df.iterrows():
+            with st.expander(f"{row['local_time']} - {row['signal']} ({row['confidence']*100:.0f}%)", expanded=True):
+                st.write(row['reason'])
+    except Exception:
+        st.info("🧠 AI is analyzing live data. No signals recorded yet.")
 
-# --- 8. REFRESH ---
-time.sleep(5)
+# --- 9. AUTO-REFRESH ---
+time.sleep(10) 
 st.rerun()
