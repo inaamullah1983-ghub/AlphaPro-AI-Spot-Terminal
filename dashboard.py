@@ -6,9 +6,10 @@ import time
 import asyncio
 import os
 
-# --- 1. ROBUST ENGINE & DATABASE INITIALIZATION ---
+# --- 1. ROBUST ENGINE (Threaded for Cloud Stability) ---
+import threading
 from agent.database import init_db
-from agent.config import SYMBOLS, MIN_CANDLES_REQUIRED
+from agent.config import SYMBOLS
 from agent.tasks import start_stream
 from agent.main import _ws_message_handler
 
@@ -17,29 +18,27 @@ init_db()
 
 @st.cache_resource
 def start_global_engine():
-    """Starts the Binance engine once and persists across all reruns/refreshes."""
-    try:
-        # Get or create the persistent event loop
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        active_tasks = []
-        for symbol in SYMBOLS:
-            # start_stream creates the task; we store it to prevent garbage collection
-            task = start_stream(symbol, "1m", _ws_message_handler) 
-            active_tasks.append(task)
+    """Runs the Binance stream in a dedicated background thread to stay alive on Cloud."""
+    def run_async_engine():
+        # Create a private event loop for this background thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
-        print("🚀 Global AlphaPro Engine Started (Persistent)")
-        return active_tasks
-    except Exception as e:
-        print(f"❌ Critical Engine Startup Error: {e}")
-        return []
+        for symbol in SYMBOLS:
+            # start_stream already creates a task internally
+            start_stream(symbol, "1m", _ws_message_handler)
+            
+        print("🚀 Background Engine is now LIVE (Threaded)")
+        # Keep this thread's loop running forever
+        loop.run_forever()
 
-# Run the cached engine (Streamlit handles the "started" check automatically)
-global_engine_tasks = start_global_engine()
+    # Start the thread and set daemon=True so it closes when the app closes
+    thread = threading.Thread(target=run_async_engine, daemon=True)
+    thread.start()
+    return True
+
+# Trigger the engine (Streamlit caches this so it only runs ONCE)
+engine_is_running = start_global_engine()
 
 # --- 2. LAYOUT CONFIG ---
 st.set_page_config(page_title="AlphaPro Terminal", page_icon="📟", layout="wide")
